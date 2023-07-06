@@ -14,8 +14,9 @@ module GoodJob
     cattr_accessor :performing_active_job_ids, default: Concurrent::Set.new
 
     # @param queue_string [String] Queues to execute jobs from
-    def initialize(queue_string)
+    def initialize(queue_string, capsule: GoodJob.capsule)
       @queue_string = queue_string
+      @capsule = capsule
       @metrics = Metrics.new
     end
 

@@ -11,12 +11,16 @@ module GoodJob
     #   @return [Array<GoodJob::Capsule>, nil]
     cattr_reader :instances, default: Concurrent::Array.new, instance_reader: false
 
+    attr_reader :process_tracker
+
     # @param configuration [GoodJob::Configuration] Configuration to use for this capsule.
     def initialize(configuration: GoodJob.configuration)
       @configuration = configuration
       @startable = true
       @started_at = nil
       @mutex = Mutex.new
+
+      @process_tracker = GoodJob::CapsuleTracker.new
 
       self.class.instances << self
     end
@@ -30,14 +34,15 @@ module GoodJob
         return unless startable?(force: force)
 
         @shared_executor = GoodJob::SharedExecutor.new
-        @notifier = GoodJob::Notifier.new(enable_listening: @configuration.enable_listen_notify, executor: @shared_executor.executor)
+        @notifier = GoodJob::Notifier.new(enable_listening: @configuration.enable_listen_notify, capsule: self, executor: @shared_executor.executor)
         @poller = GoodJob::Poller.new(poll_interval: @configuration.poll_interval)
-        @multi_scheduler = GoodJob::MultiScheduler.from_configuration(@configuration, warm_cache_on_initialize: true)
+        @multi_scheduler = GoodJob::MultiScheduler.from_configuration(@configuration, capsule: self, warm_cache_on_initialize: true)
         @notifier.recipients.push([@multi_scheduler, :create_thread])
         @poller.recipients.push(-> { @multi_scheduler.create_thread({ fanout: true }) })
 
         @cron_manager = GoodJob::CronManager.new(@configuration.cron_entries, start_on_initialize: true, executor: @shared_executor.executor) if @configuration.enable_cron?
 
+        Rails.application.executor.wrap { @process_tracker.register }
         @startable = false
         @started_at = Time.current
       end
@@ -53,6 +58,7 @@ module GoodJob
     def shutdown(timeout: NONE)
       timeout = @configuration.shutdown_timeout if timeout == NONE
       GoodJob._shutdown_all([@shared_executor, @notifier, @poller, @multi_scheduler, @cron_manager].compact, timeout: timeout)
+      Rails.application.executor.wrap { process_tracker.unregister }
       @startable = false
       @started_at = nil
     end
@@ -97,6 +103,12 @@ module GoodJob
     def create_thread(job_state = nil)
       start if startable?
       @multi_scheduler&.create_thread(job_state)
+    end
+
+    # UUID for this capsule; to be used for inspection (not directly for locking jobs).
+    # @return [String]
+    def process_id
+      @process_tracker.process_id
     end
 
     private
